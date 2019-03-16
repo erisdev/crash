@@ -1,0 +1,599 @@
+Resources = {
+["lib/runtime.lua"]="local IMPORT_BLACKLIST = {\n    import = true,\n    from = true,\n}\n\n_ENV.Crash = {\n    modules = {},\n    main = nil,\n}\n\nlocal Globals = setmetatable({}, {__index=_ENV})\nGlobals._ENV = Globals\nGlobals._G = Globals\nCrash.globals = Globals\n\nfunction Globals.from(path)\n    local caller = getfenv(2)\n    caller.__from = Crash.load(path, caller.__module)\nend\n\nfunction Globals.import(...)\n    local caller = getfenv(2)\n    local module = caller.__from\n    caller.__from = nil\n    if not module then error(\"'import' without 'from'\") end\n\n    local names = {...}\n    if #names == 1 and type(names[1]) == \"table\" then\n        -- must be doing named imports\n        names = names[1]\n    end\n\n    for as,var in pairs(names) do\n        assert(module.globals[var] ~= nil,\n                (\"%q does not export %q\"):format(module.name, var))\n        assert(not (IMPORT_BLACKLIST[var] or var:sub(1,1) == \"_\"),\n                (\"don't import %q dude you might break something\"):format(module.name, var))\n        if type(as) == \"number\" then\n            caller[var] = module.globals[var]\n        else\n            caller[as] = module.globals[var]\n        end\n    end\nend\n\nfunction Crash.define(name, func)\n    local module = {\n        name = name,\n        path = path or name,\n        loading = false,\n        loaded = false,\n    }\n\n    -- create module environment\n    local env = setmetatable({\n        __module=module,\n    }, {\n        __index=Crash.globals,\n    })\n    env._ENV = env\n\n    module.globals = env\n    setfenv(func, env)\n\n    function module.load(...)\n        assert(not module.loading, \"circular module dependency detected\")\n        module.loading = true\n        local ret = func(...)\n        module.loading = false\n        module.loaded = true\n        return ret\n    end\n    Crash.modules[name] = module\n\n    -- set entry point with first module by default\n    if not Crash.main then Crash.main = module end\n\n    return module\nend\n\nfunction Crash.get(name, rel)\n    local dir = fs.getDir(rel.path)\n    local path = fs.combine(dir, name)\n    local module = Crash.modules[path]\n    assert(module, string.format(\"no module named %q (%q)\", name, path))\n    return module\nend\n\nfunction Crash.load(name, rel)\n    local module = Crash.get(name, rel)\n    if not module.loaded then module.load() end\n    return module\nend\n\nfunction Crash.run(name, ...)\n    local module = Crash.modules[name]\n    return module.load(...)\nend",
+}
+local IMPORT_BLACKLIST = {
+    import = true,
+    from = true,
+}
+
+_ENV.Crash = {
+    modules = {},
+    main = nil,
+}
+
+local Globals = setmetatable({}, {__index=_ENV})
+Globals._ENV = Globals
+Globals._G = Globals
+Crash.globals = Globals
+
+function Globals.from(path)
+    local caller = getfenv(2)
+    caller.__from = Crash.load(path, caller.__module)
+end
+
+function Globals.import(...)
+    local caller = getfenv(2)
+    local module = caller.__from
+    caller.__from = nil
+    if not module then error("'import' without 'from'") end
+
+    local names = {...}
+    if #names == 1 and type(names[1]) == "table" then
+        -- must be doing named imports
+        names = names[1]
+    end
+
+    for as,var in pairs(names) do
+        assert(module.globals[var] ~= nil,
+                ("%q does not export %q"):format(module.name, var))
+        assert(not (IMPORT_BLACKLIST[var] or var:sub(1,1) == "_"),
+                ("don't import %q dude you might break something"):format(module.name, var))
+        if type(as) == "number" then
+            caller[var] = module.globals[var]
+        else
+            caller[as] = module.globals[var]
+        end
+    end
+end
+
+function Crash.define(name, func)
+    local module = {
+        name = name,
+        path = path or name,
+        loading = false,
+        loaded = false,
+    }
+
+    -- create module environment
+    local env = setmetatable({
+        __module=module,
+    }, {
+        __index=Crash.globals,
+    })
+    env._ENV = env
+
+    module.globals = env
+    setfenv(func, env)
+
+    function module.load(...)
+        assert(not module.loading, "circular module dependency detected")
+        module.loading = true
+        local ret = func(...)
+        module.loading = false
+        module.loaded = true
+        return ret
+    end
+    Crash.modules[name] = module
+
+    -- set entry point with first module by default
+    if not Crash.main then Crash.main = module end
+
+    return module
+end
+
+function Crash.get(name, rel)
+    local dir = fs.getDir(rel.path)
+    local path = fs.combine(dir, name)
+    local module = Crash.modules[path]
+    assert(module, string.format("no module named %q (%q)", name, path))
+    return module
+end
+
+function Crash.load(name, rel)
+    local module = Crash.get(name, rel)
+    if not module.loaded then module.load() end
+    return module
+end
+
+function Crash.run(name, ...)
+    local module = Crash.modules[name]
+    return module.load(...)
+end
+
+Crash.define("lib/crashfile", function(...)
+from "tools" import (
+    "ImmutableProxy", "bind", "capture_stack", "prototype", "qf")
+from "target-spec" import "TargetSpec"
+
+-- global functions that may be needed by Crashfile scripts.
+-- notably missing are computercraft apis and i/o.
+local essentials = {
+    error = function(message) error(message, 0) end,
+    ipairs = ipairs,
+    math = math,
+    pairs = pairs,
+    string = string,
+    table = table,
+    tonumber = tonumber,
+    tostring = tostring,
+    type = type,
+    unpack = unpack,
+}
+
+_ENV.Crashfile = prototype()
+
+function Crashfile:init(filename)
+    local path = shell.resolve(filename)
+    assert(fs.exists(path), qf"%q doesn't exist"(path))
+    self.targets = {}
+    self.default_target = nil
+    self.filename = path
+    self.dirname = fs.getDir(path)
+
+    -- create execution environment
+    local env = setmetatable({
+        CRASHFILE = self.filename,
+        PROJECT_DIR = self.dirname,
+        TARGETS = ImmutableProxy(self.targets, "targets"),
+
+        -- include = bind(self, 'dsl_include'),
+        build = bind(self, 'dsl_build'),
+        task = bind(self, 'dsl_task'),
+    }, {__index=essentials})
+    env._G = env
+    env._ENV = env
+
+    local script = loadfile(self.filename, env)
+    script()
+end
+
+function Crashfile:dsl_build(name)
+    local target = self.targets[name]
+    if not target then
+        target = TargetSpec(self, name)
+        self.targets[name] = target
+    end
+    if not self.default_target then
+        self.default_target = name
+    end
+    return target
+end
+
+function Crashfile:dsl_task(name)
+    error("yo chill it's not implemented yet")
+end
+
+function Crashfile:list_targets()
+    print("Targets:")
+    for name,target in pairs(self.targets) do
+        if #target.deps > 0 then
+            print(qf" - %s => %s"(
+                    target.name, table.concat(target.deps, ", ")))
+        else
+            print(qf" - %s"(target.name))
+        end
+    end
+end
+
+function Crashfile:get_target(name)
+    name = name or self.default_target
+    assert(name, "there is no default target")
+    local target = self.targets[name or self.default_target]
+    assert(target, qf"%q isn't a known target"(name))
+    return target
+end
+
+function Crashfile:run_target(name, opts)
+    local target = self:get_target(name)
+    assert(target.main, qf"target %q has no entry point"(target.name))
+
+    local sandbox = setmetatable({}, {__index=_ENV})
+    sandbox._ENV = sandbox
+    sandbox._G = sandbox
+
+    -- load resources
+    local resources = {}
+    sandbox.Resources = resources
+    for name,path in pairs(target.resources) do
+        local infile = fs.open(path, "r")
+        local data = infile.readAll()
+        infile.close()
+        resources[name] = data
+    end
+
+    -- load runtime
+    local func, status, err
+    if target.runtime then
+        func, err = loadfile(target.runtime, sandbox)
+    else
+        func, err = load(Resources["lib/runtime.lua"], "<CRASH_RUNTIME>", "t", sandbox)
+    end
+    if not func then error(err, 0) end
+
+    status, res = capture_stack(opts, func)
+    if not status then return end
+
+    -- load modules
+    local runtime = sandbox.Crash
+    for name,path in pairs(target.modules) do
+        local file = fs.open(path, "r")
+        func, err = load(file.readAll(), name, "t", sandbox)
+        file.close()
+        if not func then
+            local lineno, msg = err:match("%]:(%d+): (.+)$")
+            error(qf"%s:%d: %s"(name,lineno,msg), 0)
+        end
+        runtime.define(name, func)
+    end
+    capture_stack(opts, runtime.run, target.main, unpack(opts.args))
+end
+
+
+local function copy_lines(outfile, infile)
+    local line = infile.readLine()
+    while line do
+        outfile.write(line)
+        outfile.write("\n")
+        line = infile.readLine()
+    end
+end
+
+function Crashfile:build_target(name, opts)
+    local target = self:get_target(name)
+    assert(target.main, qf"target %q has no entry point"(target.name))
+
+    local outfile = fs.open(target.product, "w")
+
+    -- write resources
+    outfile.write("Resources = {\n")
+    for name,path in pairs(target.resources) do
+        local infile = fs.open(path, "r")
+        local data = textutils.serialize(infile.readAll()):gsub("\\\n", "\\n")
+        infile.close()
+        outfile.write(qf"[%q]=%s,\n"(name, data))
+    end
+    outfile.write("}\n")
+
+    -- write runtime
+    if target.runtime then
+        local infile = fs.open(target.runtime, "r")
+        copy_lines(outfile, infile)
+        infile.close()
+    else
+        outfile.write(Resources["lib/runtime.lua"])
+    end
+
+    -- write modules
+    outfile.write("\n")
+    for name,path in pairs(target.modules) do
+        outfile.write(qf"Crash.define(%q, function(...)\n"(name))
+        local infile = fs.open(path, "r")
+        copy_lines(outfile, infile)
+        outfile.write("end)\n")
+    end
+    outfile.write(qf"Crash.run(%q, ...)"(target.main))
+    outfile.close()
+end
+end)
+Crash.define("lib/target-spec", function(...)
+from "tools" import ("prototype", "qf", "trim_ext")
+
+_ENV.TargetSpec = prototype()
+
+function TargetSpec:init(crashfile, name)
+    local mt = getmetatable(self)
+    mt.__call = self.define
+
+    self.crashfile = crashfile
+    self.name = name
+    self.product = shell.resolve(name)
+    self.main = nil
+
+    self.modules = {}
+    self.resources = {}
+    self.deps = {}
+end
+
+function TargetSpec:resolve_file(name)
+    assert(type(name) == 'string', "filename must be string")
+    local path = fs.combine(self.crashfile.dirname, name)
+    assert(fs.exists(path),
+            qf"%q doesn't exist"(path))
+    return path
+end
+
+function TargetSpec:define(t)
+    for k,v in pairs(t) do
+        if k == 'main' then
+            assert(type(v) == 'string', "main must be a module name")
+            self[k] = trim_ext(v)
+        elseif k == 'product' then
+            assert(type(v) == 'string', "product must be a filename")
+            self[k] = shell.resolve(v)
+        elseif k == 'runtime' then
+            assert(type(v) == 'string', "runtime must be a filename")
+            self.runtime = self:resolve_file(v)
+        elseif k == 'modules' then
+            self:add_modules(v)
+        elseif k == 'resources' then
+            self:add_resources(v)
+        else
+            error(qf"%q is not a target parameter"(k))
+        end
+    end
+    return self
+end
+
+function TargetSpec:add_modules(t)
+    for k,v in pairs(t) do
+        if type(k) == "number" then
+            self:add_module(v)
+        else
+            self:add_module(k,v)
+        end
+    end
+end
+
+function TargetSpec:add_module(name, path)
+    path = self:resolve_file(name or path)
+    name = trim_ext(name)
+    self.modules[name] = path
+    if not self.main then self.main = name end
+end
+
+function TargetSpec:add_resources(t)
+    for i,name in ipairs(t) do
+        self:add_resource(name)
+    end
+end
+
+function TargetSpec:add_resource(name)
+    self.resources[name] = self:resolve_file(path or name)
+end
+end)
+Crash.define("lib/tools", function(...)
+
+function qf(fmt)
+    return function(...)
+        return string.format(fmt, ...)
+    end
+end
+
+
+function prototype()
+    local function new(proto, ...)
+        local inst = setmetatable({}, {__index=proto})
+        if inst.init then inst:init(...) end
+        return inst
+    end
+    return setmetatable({}, {__call=new})
+end
+
+
+function bind(self, k)
+    local method = self[k]
+    return function(...) 
+        return method(self, ...)
+    end
+end
+
+
+function trim_ext(name)
+    if name:sub(-4) == ".lua" then
+        return name:sub(1, -5)
+    else
+        return name
+    end
+end
+
+
+function ImmutableProxy(t, name)
+    local mt = {
+        __index = t,
+        __metatable = nil,
+    }
+
+    function mt:__newindex(k,v)
+        error(qf"%s is read-only"(name))
+    end
+
+    return setmetatable({}, mt)
+end
+
+function capture_stack(opts, func, ...)
+    local handlers = {xpcall=xpcall}
+    local args = {...}
+
+    local status
+    local ret
+
+    function handlers.try()
+        if args then
+            ret = func(unpack(args))
+        else
+            ret = func()
+        end
+        status = true
+    end
+
+    function handlers.catch(errmsg)
+        local stack = {errmsg:match(": (.+)$") or errmsg}
+        local atend = false
+        local maxdepth = math.huge
+        local level = 1
+        repeat
+            local _,sentinel = pcall(error, "@", level+2)
+            local chunk = sentinel:match("^(.-):")
+            if chunk == "<CRASH_TRACE>" then
+                -- reached the end
+                table.remove(stack) -- capture_stack
+                table.remove(stack) -- catch
+                atend = true
+                break
+            elseif chunk == "<CRASH_RUNTIME>" then
+                -- don't show this one
+            else
+                table.insert(stack,
+                        "  at "..sentinel:match("^(.+): @$"))
+            end
+            level = level + 1
+        until #stack == maxdepth
+
+        if not atend then table.insert(stack, "  ...") end
+
+        if opts.clear_screen then
+            term.setBackgroundColor(color.black)
+            term.setTextColor(color.white)
+            term.clear()
+        end
+
+        term.setTextColor(colors.red)
+        for i,line in ipairs(stack) do
+            print(line)
+        end
+        term.setTextColor(colors.white)
+
+        if opts.log_file then
+            local fd = fs.open(opts.log_file, "w")
+            for i,line in ipairs(stack) do
+                fd.print(line)
+            end
+            fd.close()
+        end
+    end
+
+    load([[xpcall(try,catch)]], "<CRASH_TRACE>", "t", handlers)()
+    return status, ret
+end
+end)
+Crash.define("crash", function(...)
+from "lib/crashfile" import "Crashfile"
+
+local Help = {}
+
+Help.crash = [[
+    Smash multiple lua files together into a
+    single executable for easy distribution.
+
+Commands:
+    run <target>
+    build <target>
+    targets
+
+Options:
+    -h [<command>]
+            Show help for <command>.
+]]
+
+Help.run = [[
+    Run a target directly. Crash will capture the
+    stack in the "unlikely" event that an error
+    occurs.
+
+Usage:
+    crash run [<target>]
+
+Options:
+    -x      Reset the terminal before printing
+            the stack trace. Useful for full-
+            screen programs.
+    -l <file>
+            Log the stack trace to <file>.
+]]
+
+Help.build = [[
+    Do the main thing.
+
+Usage:
+    crash build [<target>]
+]]
+
+Help.targets = [[
+    List all available targets.
+
+Usage:
+    crash targets
+]]
+
+local Flags = {}
+
+function Flags.h(opts, args)
+    local cmd = args[1] or opts.command
+    if cmd and Help[cmd] then
+        print(Help[cmd])
+    else
+        print(Help.crash)
+    end
+    opts.exit = true
+end
+
+Flags['help'] = Flags.h
+Flags['-help'] = Flags.h
+
+function Flags.F(opts, args)
+    opts.filename = table.remove(args, 1)
+    assert(opts.filename, "missing argument to -F")
+end
+
+function Flags.x(opts, args)
+    opts.clear_screen = true
+end
+
+function Flags.l(opts, args)
+    opts.error_log = table.remove(args, 1)
+    assert(opts.error_log, "missing argument to -l")
+end
+
+function main(...)
+    local opts = {
+        filename = "Crashfile",
+        command = nil,
+        target = nil,
+
+        -- these options technically only make sense for the run command
+        clear_screen = false,
+        log_file = nil,
+
+        -- gdi why is there no exit function
+        exit = false
+    }
+
+    local args = {...}
+    while #args > 0 do
+        local arg = table.remove(args, 1)
+        if arg == "--" then
+            break
+        elseif arg:sub(1,1) == "-" then
+            local flagfunc = Flags[arg:sub(2)]
+            assert(flagfunc, qf"%q is not a recognized flag"(arg))
+            flagfunc(opts, args)
+        elseif not opts.command then
+            opts.command = arg
+        elseif not opts.target then
+            opts.target = arg
+            break
+        end
+
+        if opts.exit then break end
+    end
+    opts.args = args
+
+    -- ok
+    if opts.exit then return end
+
+    if opts.command == "run" then
+        Crashfile(opts.filename):run_target(opts.target, opts)
+    elseif opts.command == "build" then
+        Crashfile(opts.filename):build_target(opts.target)
+    elseif opts.command == "targets" then
+        Crashfile(opts.filename):list_targets()
+    else
+        print(Help.crash)
+    end
+end
+
+main(...)
+
+-- vim: set ft=lua
+end)
+Crash.run("crash", ...)

@@ -1,0 +1,15 @@
+build "crash" {
+    product = "bin/crash",
+    runtime = "lib/runtime.lua",
+    modules = {
+        "crash.lua",
+        "lib/crashfile.lua",
+        "lib/target-spec.lua",
+        "lib/tools.lua",
+    },
+    resources = {
+        "lib/runtime.lua",
+    },
+}
+
+-- vim: set ft=lua
