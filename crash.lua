@@ -1,4 +1,5 @@
 from "lib/crashfile" import "Crashfile"
+from "lib/tools" import "qf"
 
 local Help = {}
 
