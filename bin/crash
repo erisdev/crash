@@ -1,6 +1,7 @@
 Resources = {
-["lib/runtime.lua"]="local IMPORT_BLACKLIST = {\n    import = true,\n    from = true,\n}\n\n_ENV.Crash = {\n    modules = {},\n    main = nil,\n}\n\nlocal Globals = setmetatable({}, {__index=_ENV})\nGlobals._ENV = Globals\nGlobals._G = Globals\nCrash.globals = Globals\n\nfunction Globals.from(path)\n    local caller = getfenv(2)\n    caller.__from = Crash.load(path, caller.__module)\nend\n\nfunction Globals.import(...)\n    local caller = getfenv(2)\n    local module = caller.__from\n    caller.__from = nil\n    if not module then error(\"'import' without 'from'\") end\n\n    local names = {...}\n    if #names == 1 and type(names[1]) == \"table\" then\n        -- must be doing named imports\n        names = names[1]\n    end\n\n    for as,var in pairs(names) do\n        assert(module.globals[var] ~= nil,\n                (\"%q does not export %q\"):format(module.name, var))\n        assert(not (IMPORT_BLACKLIST[var] or var:sub(1,1) == \"_\"),\n                (\"don't import %q dude you might break something\"):format(module.name, var))\n        if type(as) == \"number\" then\n            caller[var] = module.globals[var]\n        else\n            caller[as] = module.globals[var]\n        end\n    end\nend\n\nfunction Crash.define(name, func)\n    local module = {\n        name = name,\n        path = path or name,\n        loading = false,\n        loaded = false,\n    }\n\n    -- create module environment\n    local env = setmetatable({\n        __module=module,\n    }, {\n        __index=Crash.globals,\n    })\n    env._ENV = env\n\n    module.globals = env\n    setfenv(func, env)\n\n    function module.load(...)\n        assert(not module.loading, \"circular module dependency detected\")\n        module.loading = true\n        local ret = func(...)\n        module.loading = false\n        module.loaded = true\n        return ret\n    end\n    Crash.modules[name] = module\n\n    -- set entry point with first module by default\n    if not Crash.main then Crash.main = module end\n\n    return module\nend\n\nfunction Crash.get(name, rel)\n    local dir = fs.getDir(rel.path)\n    local path = fs.combine(dir, name)\n    local module = Crash.modules[path]\n    assert(module, string.format(\"no module named %q (%q)\", name, path))\n    return module\nend\n\nfunction Crash.load(name, rel)\n    local module = Crash.get(name, rel)\n    if not module.loaded then module.load() end\n    return module\nend\n\nfunction Crash.run(name, ...)\n    local module = Crash.modules[name]\n    return module.load(...)\nend",
+["lib/runtime.lua"]="local EXIT_SYM = \"<CRASH_EXIT_5dc4715231ef4623ab32a3e6136c030b>\"\nlocal IMPORT_BLACKLIST = {\n    import = true,\n    from = true,\n}\n\n_ENV.Crash = {\n    modules = {},\n    main = nil,\n}\n\nlocal Globals = setmetatable({}, {__index=_ENV})\nGlobals._ENV = Globals\nGlobals._G = Globals\nCrash.globals = Globals\n\nfunction Globals.from(path)\n    local caller = getfenv(2)\n    caller.__from = Crash.load(path, caller.__module)\nend\n\nfunction Globals.import(...)\n    local caller = getfenv(2)\n    local module = caller.__from\n    caller.__from = nil\n    if not module then error(\"'import' without 'from'\") end\n\n    local names = {...}\n    if #names == 1 and type(names[1]) == \"table\" then\n        -- must be doing named imports\n        names = names[1]\n    end\n\n    for as,var in pairs(names) do\n        assert(module.globals[var] ~= nil,\n                (\"%q does not export %q\"):format(module.name, var))\n        assert(not (IMPORT_BLACKLIST[var] or var:sub(1,1) == \"_\"),\n                (\"don't import %q dude you might break something\"):format(module.name, var))\n        if type(as) == \"number\" then\n            caller[var] = module.globals[var]\n        else\n            caller[as] = module.globals[var]\n        end\n    end\nend\n\nfunction Globals.exit()\n    error(EXIT_SYM, 0)\nend\n\nfunction Crash.define(name, source)\n    local module = {\n        name = name,\n        path = path or name,\n        loading = false,\n        loaded = false,\n    }\n\n    -- create module environment\n    local env = setmetatable({\n        __module=module,\n    }, {\n        __index=Crash.globals,\n    })\n    env._ENV = env\n    module.globals = env\n\n    if type(source) == \"function\" then\n        setfenv(source, env)\n    else\n        source = load(tostring(source), name, \"t\", env)\n    end\n\n    function module.load(...)\n        assert(not module.loading, \"circular module dependency detected\")\n        module.loading = true\n        local ret = source(...)\n        module.loading = false\n        module.loaded = true\n        return ret\n    end\n    Crash.modules[name] = module\n\n    -- set entry point with first module by default\n    if not Crash.main then Crash.main = module end\n\n    return module\nend\n\nfunction Crash.get(name, rel)\n    local module, path\n    if rel then\n        path = fs.combine(fs.getDir(rel.path), name)\n    else\n        path = name\n    end\n    local module = Crash.modules[path]\n    assert(module, string.format(\"no module named %q (%q)\", name, path))\n    return module\nend\n\nfunction Crash.load(name, rel)\n    local module = Crash.get(name, rel)\n    if not module.loaded then module.load() end\n    return module\nend\n\nfunction Crash.run(name, ...)\n    local args = {...}\n    local module = Crash.get(name)\n    local handlers = {xpcall=xpcall}\n    local status, ret\n\n    function handlers.try()\n        ret = module.load(unpack(args))\n        status = true\n    end\n\n    function handlers.catch(errmsg)\n        if errmsg == EXIT_SYM then\n            -- clean exit, pass\n            status = true\n        elseif Crash.error_handler then\n            ret = Crash.error_handler(errmsg, 1)\n        else\n            term.setBackgroundColor(colors.black)\n            term.setTextColor(colors.red)\n            print(errmsg)\n            term.setTextColor(colors.white)\n            ret = errmsg\n        end\n    end\n\n    load([[xpcall(try, catch)]], \"<CRASH_TRACE>\", \"t\", handlers)()\n    return status, ret\nend",
 }
+local EXIT_SYM = "<CRASH_EXIT_5dc4715231ef4623ab32a3e6136c030b>"
 local IMPORT_BLACKLIST = {
     import = true,
     from = true,
@@ -46,7 +47,11 @@ function Globals.import(...)
     end
 end
 
-function Crash.define(name, func)
+function Globals.exit()
+    error(EXIT_SYM, 0)
+end
+
+function Crash.define(name, source)
     local module = {
         name = name,
         path = path or name,
@@ -61,14 +66,18 @@ function Crash.define(name, func)
         __index=Crash.globals,
     })
     env._ENV = env
-
     module.globals = env
-    setfenv(func, env)
+
+    if type(source) == "function" then
+        setfenv(source, env)
+    else
+        source = load(tostring(source), name, "t", env)
+    end
 
     function module.load(...)
         assert(not module.loading, "circular module dependency detected")
         module.loading = true
-        local ret = func(...)
+        local ret = source(...)
         module.loading = false
         module.loaded = true
         return ret
@@ -82,8 +91,12 @@ function Crash.define(name, func)
 end
 
 function Crash.get(name, rel)
-    local dir = fs.getDir(rel.path)
-    local path = fs.combine(dir, name)
+    local module, path
+    if rel then
+        path = fs.combine(fs.getDir(rel.path), name)
+    else
+        path = name
+    end
     local module = Crash.modules[path]
     assert(module, string.format("no module named %q (%q)", name, path))
     return module
@@ -96,13 +109,38 @@ function Crash.load(name, rel)
 end
 
 function Crash.run(name, ...)
-    local module = Crash.modules[name]
-    return module.load(...)
+    local args = {...}
+    local module = Crash.get(name)
+    local handlers = {xpcall=xpcall}
+    local status, ret
+
+    function handlers.try()
+        ret = module.load(unpack(args))
+        status = true
+    end
+
+    function handlers.catch(errmsg)
+        if errmsg == EXIT_SYM then
+            -- clean exit, pass
+            status = true
+        elseif Crash.error_handler then
+            ret = Crash.error_handler(errmsg, 1)
+        else
+            term.setBackgroundColor(colors.black)
+            term.setTextColor(colors.red)
+            print(errmsg)
+            term.setTextColor(colors.white)
+            ret = errmsg
+        end
+    end
+
+    load([[xpcall(try, catch)]], "<CRASH_TRACE>", "t", handlers)()
+    return status, ret
 end
 
 Crash.define("lib/crashfile", function(...)
 from "tools" import (
-    "ImmutableProxy", "bind", "capture_stack", "prototype", "qf")
+    "ImmutableProxy", "bind", "capture_stack", "print_stack", "prototype", "qf")
 from "target-spec" import "TargetSpec"
 
 -- global functions that may be needed by Crashfile scripts.
@@ -210,8 +248,11 @@ function Crashfile:run_target(name, opts)
     end
     if not func then error(err, 0) end
 
-    status, res = capture_stack(opts, func)
-    if not status then return end
+    status, err = xpcall(func, capture_stack)
+    if not status then
+        print_stack(opts, err)
+        exit()
+    end
 
     -- load modules
     local runtime = sandbox.Crash
@@ -225,7 +266,14 @@ function Crashfile:run_target(name, opts)
         end
         runtime.define(name, func)
     end
-    capture_stack(opts, runtime.run, target.main, unpack(opts.args))
+
+    -- run it!!!
+    runtime.error_handler = capture_stack
+    status, err = runtime.run(target.main, unpack(opts.args))
+    if not status then
+        print_stack(opts, err)
+        exit()
+    end
 end
 
 
@@ -400,74 +448,58 @@ function ImmutableProxy(t, name)
     return setmetatable({}, mt)
 end
 
-function capture_stack(opts, func, ...)
-    local handlers = {xpcall=xpcall}
-    local args = {...}
 
-    local status
-    local ret
-
-    function handlers.try()
-        if args then
-            ret = func(unpack(args))
-        else
-            ret = func()
+local HIDE_CHUNKS = {
+    pcall=true,
+    xpcall=true,
+    ["<CRASH_RUNTIME>"]=true,
+}
+function capture_stack(errmsg, offset)
+    local stack = {errmsg:match(": (.+)$") or errmsg}
+    local atend = false
+    local maxdepth = 10
+    local level = 1
+    offset = offset or 0
+    repeat
+        local _,sentinel = pcall(error, "@", level+offset+2)
+        local chunk = sentinel:match("^(.-):")
+        if chunk == "<CRASH_TRACE>" then
+            -- reached the end
+            atend = true
+            break
+        elseif not HIDE_CHUNKS[chunk] then
+            table.insert(stack,
+                    "  at "..sentinel:match("^(.+): @$"))
         end
-        status = true
-    end
+        level = level + 1
+    until #stack == maxdepth
 
-    function handlers.catch(errmsg)
-        local stack = {errmsg:match(": (.+)$") or errmsg}
-        local atend = false
-        local maxdepth = math.huge
-        local level = 1
-        repeat
-            local _,sentinel = pcall(error, "@", level+2)
-            local chunk = sentinel:match("^(.-):")
-            if chunk == "<CRASH_TRACE>" then
-                -- reached the end
-                table.remove(stack) -- capture_stack
-                table.remove(stack) -- catch
-                atend = true
-                break
-            elseif chunk == "<CRASH_RUNTIME>" then
-                -- don't show this one
-            else
-                table.insert(stack,
-                        "  at "..sentinel:match("^(.+): @$"))
-            end
-            level = level + 1
-        until #stack == maxdepth
+    if not atend then table.insert(stack, "  ...") end
+    return table.concat(stack, "\n")
+end
 
-        if not atend then table.insert(stack, "  ...") end
 
-        if opts.clear_screen then
-            term.setBackgroundColor(color.black)
-            term.setTextColor(color.white)
-            term.clear()
-        end
-
-        term.setTextColor(colors.red)
-        for i,line in ipairs(stack) do
-            print(line)
-        end
+function print_stack(opts, stack)
+    if opts.clear_screen then
+        term.setBackgroundColor(colors.black)
         term.setTextColor(colors.white)
-
-        if opts.log_file then
-            local fd = fs.open(opts.log_file, "w")
-            for i,line in ipairs(stack) do
-                fd.print(line)
-            end
-            fd.close()
-        end
+        term.clear()
     end
 
-    load([[xpcall(try,catch)]], "<CRASH_TRACE>", "t", handlers)()
-    return status, ret
+    term.setTextColor(colors.red)
+    print(stack)
+    term.setTextColor(colors.white)
+
+    if opts.log_file then
+        local fd = fs.open(opts.log_file, "w")
+        fd.print(stack)
+        fd.close()
+    end
 end
 end)
 Crash.define("crash", function(...)
 from "lib/crashfile" import "Crashfile"
+from "lib/tools" import "qf"
 
 local Help = {}
 

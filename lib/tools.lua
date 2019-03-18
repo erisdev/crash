@@ -46,68 +46,51 @@ function ImmutableProxy(t, name)
     return setmetatable({}, mt)
 end
 
-function capture_stack(opts, func, ...)
-    local handlers = {xpcall=xpcall}
-    local args = {...}
 
-    local status
-    local ret
-
-    function handlers.try()
-        if args then
-            ret = func(unpack(args))
-        else
-            ret = func()
+local HIDE_CHUNKS = {
+    pcall=true,
+    xpcall=true,
+    ["<CRASH_RUNTIME>"]=true,
+}
+function capture_stack(errmsg, offset)
+    local stack = {errmsg:match(": (.+)$") or errmsg}
+    local atend = false
+    local maxdepth = 10
+    local level = 1
+    offset = offset or 0
+    repeat
+        local _,sentinel = pcall(error, "@", level+offset+2)
+        local chunk = sentinel:match("^(.-):")
+        if chunk == "<CRASH_TRACE>" then
+            -- reached the end
+            atend = true
+            break
+        elseif not HIDE_CHUNKS[chunk] then
+            table.insert(stack,
+                    "  at "..sentinel:match("^(.+): @$"))
         end
-        status = true
-    end
+        level = level + 1
+    until #stack == maxdepth
 
-    function handlers.catch(errmsg)
-        local stack = {errmsg:match(": (.+)$") or errmsg}
-        local atend = false
-        local maxdepth = math.huge
-        local level = 1
-        repeat
-            local _,sentinel = pcall(error, "@", level+2)
-            local chunk = sentinel:match("^(.-):")
-            if chunk == "<CRASH_TRACE>" then
-                -- reached the end
-                table.remove(stack) -- capture_stack
-                table.remove(stack) -- catch
-                atend = true
-                break
-            elseif chunk == "<CRASH_RUNTIME>" then
-                -- don't show this one
-            else
-                table.insert(stack,
-                        "  at "..sentinel:match("^(.+): @$"))
-            end
-            level = level + 1
-        until #stack == maxdepth
+    if not atend then table.insert(stack, "  ...") end
+    return table.concat(stack, "\n")
+end
 
-        if not atend then table.insert(stack, "  ...") end
 
-        if opts.clear_screen then
-            term.setBackgroundColor(color.black)
-            term.setTextColor(color.white)
-            term.clear()
-        end
-
-        term.setTextColor(colors.red)
-        for i,line in ipairs(stack) do
-            print(line)
-        end
+function print_stack(opts, stack)
+    if opts.clear_screen then
+        term.setBackgroundColor(colors.black)
         term.setTextColor(colors.white)
-
-        if opts.log_file then
-            local fd = fs.open(opts.log_file, "w")
-            for i,line in ipairs(stack) do
-                fd.print(line)
-            end
-            fd.close()
-        end
+        term.clear()
     end
 
-    load([[xpcall(try,catch)]], "<CRASH_TRACE>", "t", handlers)()
-    return status, ret
+    term.setTextColor(colors.red)
+    print(stack)
+    term.setTextColor(colors.white)
+
+    if opts.log_file then
+        local fd = fs.open(opts.log_file, "w")
+        fd.print(stack)
+        fd.close()
+    end
 end

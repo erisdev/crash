@@ -1,3 +1,4 @@
+local EXIT_SYM = "<CRASH_EXIT_5dc4715231ef4623ab32a3e6136c030b>"
 local IMPORT_BLACKLIST = {
     import = true,
     from = true,
@@ -43,7 +44,11 @@ function Globals.import(...)
     end
 end
 
-function Crash.define(name, func)
+function Globals.exit()
+    error(EXIT_SYM, 0)
+end
+
+function Crash.define(name, source)
     local module = {
         name = name,
         path = path or name,
@@ -58,14 +63,18 @@ function Crash.define(name, func)
         __index=Crash.globals,
     })
     env._ENV = env
-
     module.globals = env
-    setfenv(func, env)
+
+    if type(source) == "function" then
+        setfenv(source, env)
+    else
+        source = load(tostring(source), name, "t", env)
+    end
 
     function module.load(...)
         assert(not module.loading, "circular module dependency detected")
         module.loading = true
-        local ret = func(...)
+        local ret = source(...)
         module.loading = false
         module.loaded = true
         return ret
@@ -79,8 +88,12 @@ function Crash.define(name, func)
 end
 
 function Crash.get(name, rel)
-    local dir = fs.getDir(rel.path)
-    local path = fs.combine(dir, name)
+    local module, path
+    if rel then
+        path = fs.combine(fs.getDir(rel.path), name)
+    else
+        path = name
+    end
     local module = Crash.modules[path]
     assert(module, string.format("no module named %q (%q)", name, path))
     return module
@@ -93,6 +106,31 @@ function Crash.load(name, rel)
 end
 
 function Crash.run(name, ...)
-    local module = Crash.modules[name]
-    return module.load(...)
+    local args = {...}
+    local module = Crash.get(name)
+    local handlers = {xpcall=xpcall}
+    local status, ret
+
+    function handlers.try()
+        ret = module.load(unpack(args))
+        status = true
+    end
+
+    function handlers.catch(errmsg)
+        if errmsg == EXIT_SYM then
+            -- clean exit, pass
+            status = true
+        elseif Crash.error_handler then
+            ret = Crash.error_handler(errmsg, 1)
+        else
+            term.setBackgroundColor(colors.black)
+            term.setTextColor(colors.red)
+            print(errmsg)
+            term.setTextColor(colors.white)
+            ret = errmsg
+        end
+    end
+
+    load([[xpcall(try, catch)]], "<CRASH_TRACE>", "t", handlers)()
+    return status, ret
 end

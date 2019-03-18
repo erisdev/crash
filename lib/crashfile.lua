@@ -1,5 +1,5 @@
 from "tools" import (
-    "ImmutableProxy", "bind", "capture_stack", "prototype", "qf")
+    "ImmutableProxy", "bind", "capture_stack", "print_stack", "prototype", "qf")
 from "target-spec" import "TargetSpec"
 
 -- global functions that may be needed by Crashfile scripts.
@@ -107,8 +107,11 @@ function Crashfile:run_target(name, opts)
     end
     if not func then error(err, 0) end
 
-    status, res = capture_stack(opts, func)
-    if not status then return end
+    status, err = xpcall(func, capture_stack)
+    if not status then
+        print_stack(opts, err)
+        exit()
+    end
 
     -- load modules
     local runtime = sandbox.Crash
@@ -122,7 +125,14 @@ function Crashfile:run_target(name, opts)
         end
         runtime.define(name, func)
     end
-    capture_stack(opts, runtime.run, target.main, unpack(opts.args))
+
+    -- run it!!!
+    runtime.error_handler = capture_stack
+    status, err = runtime.run(target.main, unpack(opts.args))
+    if not status then
+        print_stack(opts, err)
+        exit()
+    end
 end
 
 
